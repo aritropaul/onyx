@@ -1,0 +1,107 @@
+namespace onyx_crdt {};
+
+enum BlockType {
+    "Paragraph",
+    "Heading1",
+    "Heading2",
+    "Heading3",
+    "BulletList",
+    "NumberedList",
+    "Code",
+    "Quote",
+    "Divider",
+};
+
+dictionary BlockState {
+    string id;
+    BlockType block_type;
+    string text;
+    sequence<string> children;
+    u32 indent_level;
+    record<string, string> meta;
+};
+
+enum SyncMessageType {
+    "SyncStep1",
+    "SyncStep2",
+    "Update",
+};
+
+dictionary SyncMessage {
+    SyncMessageType msg_type;
+    bytes data;
+};
+
+dictionary AwarenessState {
+    u64 client_id;
+    string user_name;
+    string color;
+    string? cursor_block_id;
+    u32? cursor_offset;
+};
+
+callback interface OnyxDocObserver {
+    void on_blocks_changed(sequence<string> block_ids);
+    void on_text_changed(string block_id, string text);
+};
+
+[Error]
+enum CrdtError {
+    "BlockNotFound",
+    "TransactionFailed",
+    "EncodingError",
+    "DecodingError",
+    "InvalidOperation",
+};
+
+interface OnyxDoc {
+    constructor();
+
+    [Name=create_from_update, Throws=CrdtError]
+    constructor(bytes update);
+
+    [Throws=CrdtError]
+    string create_block(BlockType block_type, string? after_block_id);
+
+    [Throws=CrdtError]
+    void delete_block(string block_id);
+
+    [Throws=CrdtError]
+    void move_block(string block_id, string? after_block_id);
+
+    [Throws=CrdtError]
+    void set_block_type(string block_id, BlockType block_type);
+
+    BlockState? get_block_state(string block_id);
+
+    sequence<BlockState> get_all_blocks();
+
+    sequence<string> get_block_order();
+
+    [Throws=CrdtError]
+    void insert_text(string block_id, u32 offset, string text);
+
+    [Throws=CrdtError]
+    void delete_text(string block_id, u32 offset, u32 length);
+
+    [Throws=CrdtError]
+    void replace_text(string block_id, u32 offset, u32 length, string text);
+
+    string? get_text(string block_id);
+
+    bytes encode_state_vector();
+
+    bytes encode_state_as_update();
+
+    [Throws=CrdtError]
+    void apply_update(bytes update);
+
+    [Throws=CrdtError]
+    bytes encode_diff(bytes state_vector);
+
+    void observe(OnyxDocObserver observer);
+
+    void unobserve();
+
+    u64 get_client_id();
+};

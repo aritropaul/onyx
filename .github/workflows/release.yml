@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    name: Rust Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action/setup@v1
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  build:
+    name: Build macOS App
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action/setup@v1
+
+      - name: Build CRDT XCFramework
+        run: make crdt
+
+      - name: Build macOS app
+        run: |
+          xcodebuild -project OnyxApp/Onyx.xcodeproj \
+            -scheme Onyx \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package app
+        run: |
+          APP_PATH=$(find build -name "Onyx.app" -type d | head -1)
+          ditto -c -k --keepParent "$APP_PATH" Onyx.app.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Onyx.app.zip
+          generate_release_notes: true

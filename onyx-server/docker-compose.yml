@@ -1,0 +1,15 @@
+services:
+  onyx-server:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - onyx-data:/data
+    environment:
+      - ONYX_DB_PATH=/data/onyx.db
+      - ONYX_BIND=0.0.0.0:3000
+      - RUST_LOG=onyx_server=info
+    restart: unless-stopped
+
+volumes:
+  onyx-data:

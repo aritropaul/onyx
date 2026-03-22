@@ -1,0 +1,25 @@
+[package]
+name = "onyx-crdt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib", "staticlib"]
+name = "onyx_crdt"
+
+[dependencies]
+yrs = "0.21"
+uniffi = { version = "0.28", features = ["cli"] }
+y-sync = "0.4"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }

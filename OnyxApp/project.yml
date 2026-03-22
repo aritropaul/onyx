@@ -1,0 +1,52 @@
+name: Onyx
+options:
+  bundleIdPrefix: com.onyx
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
+  GRDBQuery:
+    url: https://github.com/groue/GRDBQuery
+    from: "0.9.0"
+
+targets:
+  Onyx:
+    type: application
+    platform: macOS
+    sources:
+      - path: Onyx
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.onyx.app
+        PRODUCT_NAME: Onyx
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: 1
+        INFOPLIST_FILE: ""
+        GENERATE_INFOPLIST_FILE: YES
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_ENTITLEMENTS: Onyx/Onyx.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_STRICT_CONCURRENCY: minimal
+      configs:
+        Debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+    dependencies:
+      - package: GRDB
+      - package: GRDBQuery
+    info:
+      path: Onyx/Info.plist
+      properties:
+        LSMinimumSystemVersion: "26.0"
+        CFBundleName: Onyx
+        CFBundleDisplayName: Onyx
+        NSMainNibFile: ""
+        NSPrincipalClass: NSApplication
