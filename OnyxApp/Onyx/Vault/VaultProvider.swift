@@ -15,6 +15,8 @@ final class VaultProvider: DocumentProvider, @unchecked Sendable {
         fileWatcher.stop()
     }
 
+    private var inMemoryMappings: [String: String] = [:]
+    private let mappingLock = NSLock()
     private var onyxDir: URL { vaultURL.appendingPathComponent(".onyx", isDirectory: true) }
 
     private func ensureOnyxDirectory() {
@@ -81,8 +83,14 @@ final class VaultProvider: DocumentProvider, @unchecked Sendable {
             let created = (try? url.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? Date()
             let updated = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
 
-            // Read frontmatter for ID if available
             let docId = readDocumentId(at: url) ?? url.path
+
+            // Cache UUID→path in memory so resolveDocumentURL skips vault scanning
+            if !docId.hasPrefix("/") {
+                mappingLock.lock()
+                inMemoryMappings[docId] = url.path
+                mappingLock.unlock()
+            }
 
             return DocumentInfo(
                 id: docId,
@@ -213,7 +221,14 @@ final class VaultProvider: DocumentProvider, @unchecked Sendable {
     }
 
     func resolveDocumentURL(id: String) -> URL {
-        // Check mapping cache first
+        // Check in-memory cache first (populated by documents(in:))
+        mappingLock.lock()
+        let cached = inMemoryMappings[id]
+        mappingLock.unlock()
+        if let path = cached {
+            return URL(fileURLWithPath: path)
+        }
+        // Check on-disk mapping cache
         if let path = loadDocumentMapping(id: id) {
             return URL(fileURLWithPath: path)
         }

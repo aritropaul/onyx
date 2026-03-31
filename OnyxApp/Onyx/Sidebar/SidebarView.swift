@@ -60,7 +60,28 @@ struct SidebarView: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(OnyxTheme.Colors.textTertiary)
                 .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.bottom, 6)
+                .padding(.bottom, 2)
+
+            // RAG indexing indicator
+            if appState.ragEngine.isIndexing {
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Indexing vault...")
+                        .font(.system(size: 10))
+                        .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                }
+                .padding(.bottom, 4)
+                .transition(.opacity)
+                .animation(.easeInOut(duration: 0.2), value: appState.ragEngine.isIndexing)
+            } else if appState.ragEngine.totalChunks > 0 {
+                Text("\(appState.ragEngine.indexedDocumentCount) docs indexed")
+                    .font(.system(size: 10))
+                    .foregroundStyle(OnyxTheme.Colors.textTertiary.opacity(0.5))
+                    .padding(.bottom, 4)
+                    .transition(.opacity)
+                    .animation(.easeInOut(duration: 0.2), value: appState.ragEngine.isIndexing)
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {

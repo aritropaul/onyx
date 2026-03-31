@@ -70,5 +70,12 @@ private func fileWatcherCallback(
 ) {
     guard let info = clientCallBackInfo else { return }
     let watcher = Unmanaged<FileWatcher>.fromOpaque(info).takeUnretainedValue()
+
+    // Ignore changes inside .onyx/ — those are internal files (cache, RAG index, mappings).
+    // Without this filter, writes to .onyx/ trigger the watcher → re-index → more writes → infinite loop.
+    let paths = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue() as! [String]
+    let hasUserChange = paths.contains { !$0.contains("/.onyx/") && !$0.contains("/.obsidian/") }
+    guard hasUserChange else { return }
+
     watcher.handleEvent()
 }

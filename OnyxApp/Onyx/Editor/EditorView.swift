@@ -7,6 +7,7 @@ struct EditorView: View {
     @State private var markdownText: String = ""
     @State private var documentMetadata = DocumentMetadata()
     @State private var cursorOffset: Int = 0
+    @State private var isLoading = true
 
     private var bodyBinding: Binding<String> {
         Binding(
@@ -44,6 +45,7 @@ struct EditorView: View {
                             .frame(maxWidth: 800)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .onChange(of: documentMetadata) { _, newMetadata in
+                                guard !isLoading else { return }
                                 markdownText = MarkdownSerializer.replaceFrontmatter(in: markdownText, with: newMetadata)
                                 autoSave()
                                 sendSyncUpdate()
@@ -111,8 +113,10 @@ struct EditorView: View {
     private func loadDocument() {
         Task { @MainActor in
             if let content = try? await appState.provider.loadDocument(id: documentId) {
+                isLoading = true
                 documentMetadata = content.metadata
                 markdownText = content.text
+                isLoading = false
             }
 
             // Use persisted tab title immediately (no async dependency)
@@ -156,10 +160,10 @@ struct EditorView: View {
     private func saveDocument() {
         var metadata = documentMetadata
         metadata.updated = Date()
-        documentMetadata = metadata
-
+        // Build the save text without mutating @State — writing back to markdownText
+        // triggers onTextChange → autoSave → saveDocument in an infinite loop,
+        // and each cycle writes to disk triggering the file watcher → indexVault.
         let text = MarkdownSerializer.replaceFrontmatter(in: markdownText, with: metadata)
-        markdownText = text
 
         let content = DocumentContent(text: text, metadata: metadata)
 

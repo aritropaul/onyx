@@ -44,7 +44,7 @@ final class AIAssistantViewModel {
     /// Called by the view to update the tab title on first message
     var onFirstMessage: ((String) -> Void)?
 
-    func sendMessage(vaultURL: URL?) {
+    func sendMessage(vaultURL: URL?, ragEngine: RAGEngine?) {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isLoading else { return }
 
@@ -62,9 +62,18 @@ final class AIAssistantViewModel {
         let isFirstMessage = messageCount == 0
         messageCount += 1
 
+        // RAG: retrieve relevant vault context and augment prompt
+        let ragContext = ragEngine?.buildContext(for: text) ?? ""
+        let augmentedPrompt: String
+        if ragContext.isEmpty {
+            augmentedPrompt = text
+        } else {
+            augmentedPrompt = "\(ragContext)\n\n\(text)"
+        }
+
         let workDir = vaultURL
         Task.detached { [weak self] in
-            await self?.runClaude(prompt: text, workingDirectory: workDir, isFirstMessage: isFirstMessage)
+            await self?.runClaude(prompt: augmentedPrompt, workingDirectory: workDir, isFirstMessage: isFirstMessage)
         }
     }
 

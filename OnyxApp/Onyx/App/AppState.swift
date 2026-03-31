@@ -7,6 +7,7 @@ final class AppState {
     var syncManager: SyncManager?
     var provider: any DocumentProvider
     var vaultURL: URL?
+    let ragEngine = RAGEngine()
 
     var selectedProjectId: String?
     var isCommandPaletteVisible: Bool = false
@@ -66,6 +67,13 @@ final class AppState {
         Task {
             await loadSidebarData()
         }
+        if let url = vaultURL {
+            ragEngine.loadCachedIndex(vaultURL: url)
+        }
+        // Only do a full index if no cached index was loaded
+        if ragEngine.totalChunks == 0 {
+            ragEngine.indexVault(provider: provider, vaultURL: vaultURL)
+        }
         startObservingChanges()
     }
 
@@ -90,6 +98,7 @@ final class AppState {
         observeTask = Task { [weak self] in
             for await _ in provider.observeChanges() {
                 self?.refreshSidebarData()
+                self?.ragEngine.indexVault(provider: provider)
             }
         }
     }

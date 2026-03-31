@@ -118,7 +118,7 @@ struct AIAssistantView: View {
                 .lineLimit(1...8)
                 .focused($isInputFocused)
                 .onSubmit {
-                    viewModel.sendMessage(vaultURL: appState.vaultURL)
+                    viewModel.sendMessage(vaultURL: appState.vaultURL, ragEngine: appState.ragEngine)
                 }
 
             Group {
@@ -131,7 +131,7 @@ struct AIAssistantView: View {
                     .buttonStyle(.plain)
                 } else {
                     Button {
-                        viewModel.sendMessage(vaultURL: appState.vaultURL)
+                        viewModel.sendMessage(vaultURL: appState.vaultURL, ragEngine: appState.ragEngine)
                     } label: {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 18))
