@@ -9,6 +9,7 @@ enum EditorMode {
 struct MarkdownEditorField: NSViewRepresentable {
     @Binding var text: String
     var mode: EditorMode
+    var searchHighlight: String? = nil
     var onTextChange: (String) -> Void
     var onCursorChange: (Int) -> Void
     var onWikiLinkClick: ((String) -> Void)?
@@ -111,6 +112,17 @@ struct MarkdownEditorField: NSViewRepresentable {
             textView.needsDisplay = true
         }
 
+        // Apply or clear search highlights
+        if context.coordinator.currentSearchHighlight != searchHighlight {
+            context.coordinator.currentSearchHighlight = searchHighlight
+            if let term = searchHighlight, !term.isEmpty {
+                DispatchQueue.main.async {
+                    textView.highlightSearchTerm(term)
+                }
+            } else {
+                textView.clearSearchHighlights()
+            }
+        }
     }
 
     // MARK: - Coordinator
@@ -122,6 +134,7 @@ struct MarkdownEditorField: NSViewRepresentable {
         var isEditing = false
         var currentMode: EditorMode = .edit
         var isHighlighting = false
+        var currentSearchHighlight: String? = nil
         private var lastCursorLineRange: NSRange?
 
         init(_ parent: MarkdownEditorField) {

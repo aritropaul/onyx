@@ -8,6 +8,7 @@ struct EditorView: View {
     @State private var documentMetadata = DocumentMetadata()
     @State private var cursorOffset: Int = 0
     @State private var isLoading = true
+    @State private var searchHighlight: String? = nil
 
     private var bodyBinding: Binding<String> {
         Binding(
@@ -55,7 +56,9 @@ struct EditorView: View {
                         MarkdownEditorField(
                             text: bodyBinding,
                             mode: appState.editorMode,
+                            searchHighlight: searchHighlight,
                             onTextChange: { _ in
+                                searchHighlight = nil // clear on edit
                                 autoSave()
                                 sendSyncUpdate()
                             },
@@ -69,7 +72,10 @@ struct EditorView: View {
                         )
                         .frame(maxWidth: 800)
                         .frame(maxWidth: .infinity)
-                        .frame(minHeight: max(geo.size.height - 120, 300))
+                        .frame(minHeight: max(geo.size.height - 200, 300))
+
+                        // Backlinks panel
+                        BacklinksPanel(documentTitle: documentTitle)
                     }
                 }
 
@@ -117,6 +123,12 @@ struct EditorView: View {
                 documentMetadata = content.metadata
                 markdownText = content.text
                 isLoading = false
+
+                // Apply pending search highlight from sidebar/palette/search
+                if let term = appState.pendingSearchHighlight {
+                    searchHighlight = term
+                    appState.pendingSearchHighlight = nil
+                }
             }
 
             // Use persisted tab title immediately (no async dependency)
@@ -161,8 +173,8 @@ struct EditorView: View {
         var metadata = documentMetadata
         metadata.updated = Date()
         // Build the save text without mutating @State — writing back to markdownText
-        // triggers onTextChange → autoSave → saveDocument in an infinite loop,
-        // and each cycle writes to disk triggering the file watcher → indexVault.
+        // triggers onTextChange -> autoSave -> saveDocument in an infinite loop,
+        // and each cycle writes to disk triggering the file watcher -> indexVault.
         let text = MarkdownSerializer.replaceFrontmatter(in: markdownText, with: metadata)
 
         let content = DocumentContent(text: text, metadata: metadata)
@@ -183,7 +195,6 @@ struct EditorView: View {
         let pathComponents = title.split(separator: "/")
 
         if pathComponents.count > 1 {
-            // Path-based link (e.g. "Teams/AI/README") — match projectId + title exactly
             let docTitle = String(pathComponents.last!)
             let projectPath = pathComponents.dropLast().joined(separator: "/")
             if let doc = appState.documents.first(where: {
@@ -193,7 +204,6 @@ struct EditorView: View {
                 appState.openDocument(id: doc.id)
             }
         } else {
-            // Simple title link — resolve by proximity: same folder → parent/peer folders
             let candidates = appState.documents.filter {
                 $0.title.caseInsensitiveCompare(title) == .orderedSame
             }
@@ -205,26 +215,23 @@ struct EditorView: View {
 
             let currentProjectId = appState.documents.first(where: { $0.id == documentId })?.projectId ?? ""
 
-            // 1. Same folder
             if let doc = candidates.first(where: { $0.projectId == currentProjectId }) {
                 appState.openDocument(id: doc.id)
                 return
             }
 
-            // 2. Parent folder
             if !currentProjectId.isEmpty {
                 let parentPath: String
                 if let lastSlash = currentProjectId.lastIndex(of: "/") {
                     parentPath = String(currentProjectId[..<lastSlash])
                 } else {
-                    parentPath = "" // root
+                    parentPath = ""
                 }
                 if let doc = candidates.first(where: { $0.projectId == parentPath }) {
                     appState.openDocument(id: doc.id)
                     return
                 }
 
-                // 3. Peer folders (siblings sharing the same parent)
                 if let doc = candidates.first(where: { peerProjectId in
                     let candidateParent: String
                     if let slash = peerProjectId.projectId.lastIndex(of: "/") {
@@ -239,7 +246,6 @@ struct EditorView: View {
                 }
             }
 
-            // 4. Fallback to first match
             appState.openDocument(id: candidates[0].id)
         }
     }
@@ -274,6 +280,76 @@ struct EditorView: View {
                 offset: offset,
                 userName: appState.profileManager.profile.displayName
             )
+        }
+    }
+}
+
+// MARK: - Backlinks Panel
+
+struct BacklinksPanel: View {
+    let documentTitle: String
+    @Environment(AppState.self) private var appState
+    @State private var isExpanded = false
+
+    private var backlinks: [Backlink] {
+        appState.backlinkEngine.backlinks(for: documentTitle)
+    }
+
+    var body: some View {
+        if !backlinks.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Divider().opacity(0.15).padding(.horizontal, 64)
+
+                Button {
+                    withAnimation(OnyxTheme.Animation.quick) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .font(.system(size: 9, weight: .medium))
+                        Image(systemName: "link")
+                            .font(.system(size: 11))
+                        Text("\(backlinks.count) backlink\(backlinks.count == 1 ? "" : "s")")
+                            .font(.system(size: 11, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                    .padding(.horizontal, 64)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(backlinks) { link in
+                            Button {
+                                appState.openDocument(id: link.sourceDocId)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(link.sourceTitle)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(OnyxTheme.Colors.accent)
+                                    Text(link.context)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                                        .lineLimit(2)
+                                }
+                                .padding(.horizontal, 64)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.bottom, 8)
+                }
+            }
+            .frame(maxWidth: 800)
+            .frame(maxWidth: .infinity)
         }
     }
 }

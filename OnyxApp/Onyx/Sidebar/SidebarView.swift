@@ -8,6 +8,10 @@ struct SidebarView: View {
     @State private var renameText: String = ""
     @State private var hoveredId: String?
     @State private var expandedIds: Set<String> = []
+    @State private var searchQuery: String = ""
+    @State private var ragResults: [RAGResult] = []
+    @State private var ragSearchTask: Task<Void, Never>?
+    @FocusState private var isSearchFocused: Bool
 
     private var isVaultBacked: Bool {
         appState.vaultURL != nil
@@ -83,6 +87,46 @@ struct SidebarView: View {
                     .animation(.easeInOut(duration: 0.2), value: appState.ragEngine.isIndexing)
             }
 
+            // Search field
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                TextField("Search...", text: $searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(OnyxTheme.Colors.textPrimary)
+                    .focused($isSearchFocused)
+                    .onExitCommand { searchQuery = ""; ragResults = []; isSearchFocused = false }
+                    .onChange(of: searchQuery) { _, q in
+                        debounceRAGSearch(q)
+                    }
+                if !searchQuery.isEmpty {
+                    Button {
+                        searchQuery = ""
+                        ragResults = []
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSearchFocused ? OnyxTheme.Colors.surface : OnyxTheme.Colors.surface.opacity(0.5))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isSearchFocused ? OnyxTheme.Colors.accent.opacity(0.4) : .clear, lineWidth: 1)
+            )
+            .animation(OnyxTheme.Animation.quick, value: isSearchFocused)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 6)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if appState.projects.isEmpty {
@@ -114,6 +158,35 @@ struct SidebarView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 40)
+                    } else if !searchQuery.isEmpty {
+                        // Title matches (instant)
+                        let q = searchQuery.lowercased()
+                        let titleMatches = appState.documents
+                            .filter { $0.title.lowercased().contains(q) }
+                            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+                        // Content matches via RAG (debounced)
+                        let titleMatchIds = Set(titleMatches.map(\.id))
+                        let contentMatches = ragResults.filter { !titleMatchIds.contains($0.chunk.documentId) }
+
+                        let hasAny = !titleMatches.isEmpty || !contentMatches.isEmpty
+
+                        if !hasAny {
+                            Text("No results")
+                                .font(.system(size: 11))
+                                .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 20)
+                        }
+
+                        // Title results
+                        ForEach(titleMatches) { doc in
+                            searchDocRow(doc: doc)
+                        }
+
+                        // Content results with snippet
+                        ForEach(contentMatches, id: \.chunk.id) { result in
+                            searchContentRow(result: result)
+                        }
                     } else {
                         let flatItems = buildFlatList()
                         ForEach(flatItems, id: \.id) { item in
@@ -395,5 +468,76 @@ struct SidebarView: View {
                 .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Search rows
+
+    private func searchDocRow(doc: DocumentInfo) -> some View {
+        Button {
+            appState.pendingSearchHighlight = searchQuery
+            appState.openDocument(id: doc.id)
+            isSearchFocused = false
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 12, weight: .light))
+                    .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                    .frame(width: 16)
+                Text(doc.title.isEmpty ? "Untitled" : doc.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(OnyxTheme.Colors.textSecondary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func searchContentRow(result: RAGResult) -> some View {
+        Button {
+            appState.pendingSearchHighlight = searchQuery
+            appState.openDocument(id: result.chunk.documentId)
+            isSearchFocused = false
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Image(systemName: "text.magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundStyle(OnyxTheme.Colors.accent.opacity(0.7))
+                    Text(result.chunk.documentTitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(OnyxTheme.Colors.textSecondary)
+                        .lineLimit(1)
+                }
+                Text(result.chunk.content.prefix(80) + (result.chunk.content.count > 80 ? "..." : ""))
+                    .font(.system(size: 10))
+                    .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Debounced RAG search
+
+    private func debounceRAGSearch(_ query: String) {
+        ragSearchTask?.cancel()
+        guard query.count >= 3 else {
+            ragResults = []
+            return
+        }
+        ragSearchTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            let results = appState.ragEngine.search(query: query, topK: 5)
+            // Filter out low-relevance noise
+            ragResults = results.filter { $0.score > 0.01 }
+        }
     }
 }

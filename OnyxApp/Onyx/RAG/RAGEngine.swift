@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct RAGResult: Sendable {
     let chunk: TextChunk
@@ -8,6 +9,7 @@ struct RAGResult: Sendable {
 private struct RAGCache: Codable {
     let version: Int
     let entries: [VectorStore.SerializedEntry]
+    let documentHashes: [String: String]
 }
 
 @Observable @MainActor
@@ -17,13 +19,40 @@ final class RAGEngine {
     var indexedDocumentCount = 0
     var totalChunks = 0
 
+    // Context controls
+    var pinnedDocIds: Set<String> = []
+    var excludedDocIds: Set<String> = []
+
     // Index state — only touched on MainActor after swap
     private var vectorStore = VectorStore()
     private var bm25Index = BM25Index()
     private let chunker = DocumentChunker()
     private var vaultURL: URL?
+    private var documentHashes: [String: String] = [:]
 
-    nonisolated private static let cacheVersion = 1
+    nonisolated private static let cacheVersion = 2
+
+    // MARK: - Pin / Exclude
+
+    func togglePin(_ docId: String) {
+        if pinnedDocIds.contains(docId) {
+            pinnedDocIds.remove(docId)
+        } else {
+            pinnedDocIds.insert(docId)
+            excludedDocIds.remove(docId)
+        }
+        saveContextPrefs()
+    }
+
+    func toggleExclude(_ docId: String) {
+        if excludedDocIds.contains(docId) {
+            excludedDocIds.remove(docId)
+        } else {
+            excludedDocIds.insert(docId)
+            pinnedDocIds.remove(docId)
+        }
+        saveContextPrefs()
+    }
 
     // MARK: - Load cached index (instant, call before indexVault)
 
@@ -31,28 +60,30 @@ final class RAGEngine {
         self.vaultURL = vaultURL
         let cacheFile = Self.cacheURL(for: vaultURL)
 
-        // Decode inside autoreleasepool so raw Data and decoder temporaries are freed
-        let entries: [VectorStore.SerializedEntry]? = autoreleasepool {
+        let result: (entries: [VectorStore.SerializedEntry], hashes: [String: String])? = autoreleasepool {
             guard let data = try? Data(contentsOf: cacheFile),
                   let cache = try? JSONDecoder().decode(RAGCache.self, from: data),
                   cache.version == Self.cacheVersion else { return nil }
-            return cache.entries
+            return (cache.entries, cache.documentHashes)
         }
 
-        guard let entries else { return }
+        guard let result else { return }
 
-        vectorStore.load(from: entries)
+        vectorStore.load(from: result.entries)
 
         bm25Index.clear()
-        for entry in entries {
+        for entry in result.entries {
             bm25Index.add(chunk: entry.chunk)
         }
 
-        indexedDocumentCount = Set(entries.map(\.chunk.documentId)).count
-        totalChunks = entries.count
+        documentHashes = result.hashes
+        indexedDocumentCount = Set(result.entries.map(\.chunk.documentId)).count
+        totalChunks = result.entries.count
+
+        loadContextPrefs()
     }
 
-    // MARK: - Full vault indexing (heavy work runs in background)
+    // MARK: - Incremental vault indexing
 
     func indexVault(provider: any DocumentProvider, vaultURL: URL? = nil) {
         guard !isIndexing else { return }
@@ -60,46 +91,69 @@ final class RAGEngine {
         isIndexing = true
         let chunker = self.chunker
         let saveURL = self.vaultURL
-
-        // Clear old indexes now — frees memory before the heavy build starts.
-        // Search is unavailable during indexing anyway (isIndexing == true).
-        self.vectorStore = VectorStore()
-        self.bm25Index = BM25Index()
+        let oldHashes = self.documentHashes
+        let existingEntries = self.vectorStore.serialize()
 
         Task.detached {
             let docs = (try? await provider.allDocuments()) ?? []
+            let currentDocIds = Set(docs.map(\.id))
+            let oldDocIds = Set(oldHashes.keys)
+
+            var newHashes: [String: String] = [:]
+            var changedDocs: [(id: String, title: String, text: String)] = []
+            var unchangedDocIds: Set<String> = []
+
+            // Load each document and check for changes
+            for doc in docs {
+                guard let content = try? await provider.loadDocument(id: doc.id) else { continue }
+                let hash = Self.contentHash(content.text)
+                newHashes[doc.id] = hash
+
+                if oldHashes[doc.id] == hash {
+                    unchangedDocIds.insert(doc.id)
+                } else {
+                    changedDocs.append((id: doc.id, title: doc.title, text: content.text))
+                }
+            }
+
+            // Build new indexes: keep unchanged entries, re-chunk changed ones
             let newVectorStore = VectorStore()
             let newBM25 = BM25Index()
-            var chunkCount = 0
 
-            for (i, doc) in docs.enumerated() {
-                guard let content = try? await provider.loadDocument(id: doc.id) else { continue }
+            // Re-add unchanged entries from serialized cache (no re-embedding needed)
+            for entry in existingEntries {
+                if unchangedDocIds.contains(entry.chunk.documentId) {
+                    newVectorStore.addSerialized(entry)
+                    newBM25.add(chunk: entry.chunk)
+                }
+            }
 
+            // Process changed/new documents
+            for doc in changedDocs {
                 autoreleasepool {
-                    let chunks = chunker.chunk(text: content.text, documentId: doc.id, title: doc.title)
+                    let chunks = chunker.chunk(text: doc.text, documentId: doc.id, title: doc.title)
                     for chunk in chunks {
                         newVectorStore.add(chunk: chunk)
                         newBM25.add(chunk: chunk)
-                        chunkCount += 1
                     }
-                }
-
-                if i % 20 == 0 {
-                    await Task.yield()
                 }
             }
 
             newVectorStore.unloadEmbedding()
 
             if let saveURL {
-                Self.saveToDisk(vectorStore: newVectorStore, vaultURL: saveURL)
+                Self.saveToDisk(vectorStore: newVectorStore, hashes: newHashes, vaultURL: saveURL)
             }
 
             let docCount = docs.count
+            let chunkCount = newBM25.count
+            let removedCount = oldDocIds.subtracting(currentDocIds).count
+            let changedCount = changedDocs.count
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.vectorStore = newVectorStore
                 self.bm25Index = newBM25
+                self.documentHashes = newHashes
                 self.indexedDocumentCount = docCount
                 self.totalChunks = chunkCount
                 self.isIndexing = false
@@ -107,9 +161,13 @@ final class RAGEngine {
         }
     }
 
-    // MARK: - Incremental updates
+    // MARK: - Incremental single-document update
 
     func updateDocument(id: String, text: String, title: String) {
+        let hash = Self.contentHash(text)
+        guard documentHashes[id] != hash else { return } // unchanged
+        documentHashes[id] = hash
+
         vectorStore.remove(documentId: id)
         bm25Index.remove(documentId: id)
         let chunks = chunker.chunk(text: text, documentId: id, title: title)
@@ -124,11 +182,12 @@ final class RAGEngine {
     func removeDocument(id: String) {
         vectorStore.remove(documentId: id)
         bm25Index.remove(documentId: id)
+        documentHashes.removeValue(forKey: id)
         totalChunks = bm25Index.count
         saveInBackground()
     }
 
-    // MARK: - Search (runs on MainActor, fast)
+    // MARK: - Search
 
     func search(query: String, topK: Int = 5) -> [RAGResult] {
         let vectorHits = vectorStore.search(query: query, topK: topK * 2)
@@ -151,26 +210,59 @@ final class RAGEngine {
 
         return fusedScores
             .sorted { $0.value > $1.value }
-            .prefix(topK)
             .compactMap { id, score in
                 guard let chunk = chunkMap[id] else { return nil }
+                // Filter out excluded documents
+                if excludedDocIds.contains(chunk.documentId) { return nil }
                 return RAGResult(chunk: chunk, score: score)
             }
+            .prefix(topK)
+            .map { $0 }
     }
 
     /// Build a context block to prepend to the user's prompt for Claude.
-    func buildContext(for query: String, topK: Int = 5) -> String {
-        let results = search(query: query, topK: topK)
-        guard !results.isEmpty else { return "" }
+    /// Returns the context string and the results used.
+    func buildContext(for query: String, topK: Int = 5) -> (context: String, results: [RAGResult]) {
+        var results = search(query: query, topK: topK)
+
+        // Add pinned documents (always included, at the top)
+        let pinnedResults = pinnedChunks()
+        let existingIds = Set(results.map(\.chunk.documentId))
+        let newPinned = pinnedResults.filter { !existingIds.contains($0.chunk.documentId) }
+        results = newPinned + results
+
+        guard !results.isEmpty else { return ("", []) }
 
         var ctx = "<context>\nRelevant notes from your vault:\n\n"
         for (i, r) in results.enumerated() {
             ctx += "[\(i + 1)] \(r.chunk.documentTitle)"
             if let h = r.chunk.heading { ctx += " > \(h)" }
+            if pinnedDocIds.contains(r.chunk.documentId) { ctx += " (pinned)" }
             ctx += "\n\(r.chunk.content)\n\n"
         }
         ctx += "</context>"
-        return ctx
+        return (ctx, results)
+    }
+
+    private func pinnedChunks() -> [RAGResult] {
+        guard !pinnedDocIds.isEmpty else { return [] }
+        var results: [RAGResult] = []
+        for entry in vectorStore.serialize() {
+            if pinnedDocIds.contains(entry.chunk.documentId) {
+                // Take only the first chunk per pinned document
+                if !results.contains(where: { $0.chunk.documentId == entry.chunk.documentId }) {
+                    results.append(RAGResult(chunk: entry.chunk, score: 1.0))
+                }
+            }
+        }
+        return results
+    }
+
+    // MARK: - Content hash
+
+    nonisolated private static func contentHash(_ text: String) -> String {
+        let digest = SHA256.hash(data: Data(text.utf8))
+        return Array(digest).prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Persistence
@@ -182,14 +274,14 @@ final class RAGEngine {
             .appendingPathComponent("index.json")
     }
 
-    nonisolated private static func saveToDisk(vectorStore: VectorStore, vaultURL: URL) {
+    nonisolated private static func saveToDisk(vectorStore: VectorStore, hashes: [String: String], vaultURL: URL) {
         let ragDir = vaultURL
             .appendingPathComponent(".onyx", isDirectory: true)
             .appendingPathComponent("rag", isDirectory: true)
         try? FileManager.default.createDirectory(at: ragDir, withIntermediateDirectories: true)
 
         autoreleasepool {
-            let cache = RAGCache(version: cacheVersion, entries: vectorStore.serialize())
+            let cache = RAGCache(version: cacheVersion, entries: vectorStore.serialize(), documentHashes: hashes)
             if let data = try? JSONEncoder().encode(cache) {
                 try? data.write(to: ragDir.appendingPathComponent("index.json"), options: .atomic)
             }
@@ -199,18 +291,52 @@ final class RAGEngine {
     private func saveInBackground() {
         guard let vaultURL else { return }
         let serialized = vectorStore.serialize()
+        let hashes = documentHashes
         Task.detached {
             autoreleasepool {
+                Self.saveToDisk(vectorStore: VectorStore(), hashes: hashes, vaultURL: vaultURL)
+                // Actually save with the serialized entries
                 let ragDir = vaultURL
                     .appendingPathComponent(".onyx", isDirectory: true)
                     .appendingPathComponent("rag", isDirectory: true)
                 try? FileManager.default.createDirectory(at: ragDir, withIntermediateDirectories: true)
 
-                let cache = RAGCache(version: Self.cacheVersion, entries: serialized)
+                let cache = RAGCache(version: Self.cacheVersion, entries: serialized, documentHashes: hashes)
                 if let data = try? JSONEncoder().encode(cache) {
                     try? data.write(to: ragDir.appendingPathComponent("index.json"), options: .atomic)
                 }
             }
         }
     }
+
+    // MARK: - Context preferences persistence
+
+    private func contextPrefsURL() -> URL? {
+        vaultURL?
+            .appendingPathComponent(".onyx", isDirectory: true)
+            .appendingPathComponent("ai", isDirectory: true)
+            .appendingPathComponent("context.json")
+    }
+
+    private func saveContextPrefs() {
+        guard let url = contextPrefsURL() else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let prefs = ContextPrefs(pinned: Array(pinnedDocIds), excluded: Array(excludedDocIds))
+        if let data = try? JSONEncoder().encode(prefs) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func loadContextPrefs() {
+        guard let url = contextPrefsURL(),
+              let data = try? Data(contentsOf: url),
+              let prefs = try? JSONDecoder().decode(ContextPrefs.self, from: data) else { return }
+        pinnedDocIds = Set(prefs.pinned)
+        excludedDocIds = Set(prefs.excluded)
+    }
+}
+
+private struct ContextPrefs: Codable {
+    let pinned: [String]
+    let excluded: [String]
 }

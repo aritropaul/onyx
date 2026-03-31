@@ -41,6 +41,11 @@ final class VectorStore: @unchecked Sendable {
         entries.append((vector: vector, chunk: chunk))
     }
 
+    /// Add a pre-embedded entry (from cache) without re-computing the vector.
+    func addSerialized(_ entry: SerializedEntry) {
+        entries.append((vector: entry.vector, chunk: entry.chunk))
+    }
+
     func search(query: String, topK: Int) -> [(chunk: TextChunk, score: Float)] {
         guard let queryVector = embed(query), !entries.isEmpty else { return [] }
 

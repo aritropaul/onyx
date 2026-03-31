@@ -1128,5 +1128,51 @@ final class MarkdownNSTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         updateContentHeight()
+        // Any edit clears search highlights (highlightAll resets attributes anyway)
+        searchHighlightRanges = []
+    }
+
+    // MARK: - Search term highlighting
+
+    private var searchHighlightRanges: [NSRange] = []
+
+    func highlightSearchTerm(_ term: String) {
+        clearSearchHighlights()
+        guard !term.isEmpty, let textStorage = textStorage else { return }
+        let nsString = string as NSString
+        var ranges: [NSRange] = []
+        var searchStart = 0
+        while searchStart < nsString.length {
+            let range = nsString.range(of: term, options: .caseInsensitive,
+                                        range: NSRange(location: searchStart, length: nsString.length - searchStart))
+            guard range.location != NSNotFound else { break }
+            ranges.append(range)
+            searchStart = range.location + max(range.length, 1)
+        }
+        guard !ranges.isEmpty else { return }
+
+        let highlightColor = NSColor(red: 0.4, green: 0.52, blue: 1.0, alpha: 0.25)
+        textStorage.beginEditing()
+        for range in ranges {
+            textStorage.addAttribute(.backgroundColor, value: highlightColor, range: range)
+        }
+        textStorage.endEditing()
+        searchHighlightRanges = ranges
+
+        scrollRangeToVisible(ranges[0])
+        showFindIndicator(for: ranges[0])
+    }
+
+    func clearSearchHighlights() {
+        guard let textStorage = textStorage, !searchHighlightRanges.isEmpty else { return }
+        textStorage.beginEditing()
+        for range in searchHighlightRanges {
+            let safe = NSIntersectionRange(range, NSRange(location: 0, length: textStorage.length))
+            if safe.length > 0 {
+                textStorage.removeAttribute(.backgroundColor, range: safe)
+            }
+        }
+        textStorage.endEditing()
+        searchHighlightRanges = []
     }
 }

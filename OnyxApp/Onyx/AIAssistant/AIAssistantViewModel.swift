@@ -12,18 +12,32 @@ struct ChatMessage: Identifiable, Codable {
     var content: String
     var state: MessageState
     let timestamp: Date
+    var toolUses: [ToolUseInfo]
 
     enum Role: String, Codable {
         case user
         case assistant
     }
 
-    init(role: Role, content: String, state: MessageState, timestamp: Date = Date()) {
+    init(role: Role, content: String, state: MessageState, timestamp: Date = Date(), toolUses: [ToolUseInfo] = []) {
         self.id = UUID()
         self.role = role
         self.content = content
         self.state = state
         self.timestamp = timestamp
+        self.toolUses = toolUses
+    }
+}
+
+struct ToolUseInfo: Codable, Identifiable {
+    let id: String
+    let name: String
+    let input: String
+
+    init(name: String, input: String) {
+        self.id = UUID().uuidString
+        self.name = name
+        self.input = input
     }
 }
 
@@ -33,6 +47,10 @@ final class AIAssistantViewModel {
     var inputText: String = ""
     var isLoading: Bool = false
     var tabId: String?
+
+    /// Last retrieved RAG context for display in the UI
+    var lastRetrievedContext: [RAGResult] = []
+    var showContextPanel: Bool = false
 
     /// UUID session ID for this conversation — persists across messages
     var sessionId: String = UUID().uuidString
@@ -63,7 +81,9 @@ final class AIAssistantViewModel {
         messageCount += 1
 
         // RAG: retrieve relevant vault context and augment prompt
-        let ragContext = ragEngine?.buildContext(for: text) ?? ""
+        let (ragContext, results) = ragEngine?.buildContext(for: text) ?? ("", [])
+        lastRetrievedContext = results
+
         let augmentedPrompt: String
         if ragContext.isEmpty {
             augmentedPrompt = text
@@ -93,6 +113,7 @@ final class AIAssistantViewModel {
         messages.removeAll()
         messageCount = 0
         sessionId = UUID().uuidString
+        lastRetrievedContext = []
     }
 
     // MARK: - Text reveal animation
@@ -125,7 +146,7 @@ final class AIAssistantViewModel {
         }
     }
 
-    // MARK: - Claude process
+    // MARK: - Claude process (stream-json with --verbose)
 
     private func runClaude(prompt: String, workingDirectory: URL?, isFirstMessage: Bool) {
         let resolvedPath = AppSettings.shared.resolvedClaudePath
@@ -144,17 +165,26 @@ final class AIAssistantViewModel {
         let model = AppSettings.shared.claudeModel
         process.executableURL = URL(fileURLWithPath: resolvedPath)
 
-        var args = ["-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--model", model]
+        // Use --verbose + --output-format stream-json for real-time streaming.
+        // Each JSON line is flushed immediately, so readabilityHandler gets events
+        // as they happen — tool use shows up in real-time, and the final result
+        // text arrives in the "result" event.
+        var args = ["-p", "--verbose", "--output-format", "stream-json",
+                    "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions",
+                    "--model", model]
 
         if isFirstMessage {
-            // First message: start a new session with this ID
             args += ["--session-id", sessionId]
 
-            // Load custom system prompt from .onyx/ai/prompt.md
-            // Tell Claude it has full tool access
-            var systemAddendum = "You have full permissions to read, write, edit, and execute files. Never ask the user for permission — just do it."
+            var systemAddendum = """
+            You are an AI assistant embedded in Onyx, a local-first document vault editor. You have full permissions to read, write, edit, and execute files. Never ask the user for permission — just do it.
+            """
 
             if let dir = workingDirectory {
+                systemAddendum += "\n\nThe vault is at: \(dir.path)"
+                systemAddendum += "\nDocuments are markdown files with YAML frontmatter (id, created, updated, tags)."
+                systemAddendum += "\nYou can read, create, search, and edit any file in this vault."
+
                 let promptFile = dir.appendingPathComponent(".onyx/ai/prompt.md")
                 if let customPrompt = try? String(contentsOf: promptFile, encoding: .utf8),
                    !customPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -164,7 +194,6 @@ final class AIAssistantViewModel {
 
             args += ["--append-system-prompt", systemAddendum]
         } else {
-            // Subsequent messages: resume the existing session
             args += ["--resume", sessionId]
         }
 
@@ -179,24 +208,83 @@ final class AIAssistantViewModel {
 
         self.currentProcess = process
 
+        // Thread-safe state shared between readabilityHandler (background) and MainActor
+        let state = StreamState()
+
+        // Stream JSON lines as they arrive — each line is flushed by the CLI
+        outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            guard let chunk = String(data: data, encoding: .utf8) else { return }
+
+            // Buffer may contain partial lines; accumulate and split
+            state.appendBuffer(chunk)
+            let lines = state.drainLines()
+
+            for line in lines {
+                guard !line.isEmpty else { continue }
+                guard let lineData = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                      let type = json["type"] as? String else { continue }
+
+                // assistant message — extract tool_use from content blocks
+                if type == "assistant",
+                   let message = json["message"] as? [String: Any],
+                   let content = message["content"] as? [[String: Any]] {
+                    for block in content {
+                        guard let blockType = block["type"] as? String else { continue }
+                        if blockType == "tool_use", let name = block["name"] as? String {
+                            state.addToolUse(ToolUseInfo(name: name, input: ""))
+                            let snapshot = state.getToolUses()
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                if let i = self.messages.indices.last,
+                                   self.messages[i].role == .assistant {
+                                    self.messages[i].toolUses = snapshot
+                                    if self.messages[i].state == .thinking {
+                                        self.messages[i].state = .streaming
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // final result — contains the complete response text
+                if type == "result", let resultText = json["result"] as? String {
+                    state.setResult(resultText)
+                    let toolUses = state.getToolUses()
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        if let i = self.messages.indices.last,
+                           self.messages[i].role == .assistant {
+                            self.messages[i].toolUses = toolUses
+                        }
+                        self.revealText(resultText)
+                    }
+                }
+            }
+        }
+
         process.terminationHandler = { [weak self] _ in
-            let outData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            outputPipe.fileHandleForReading.readabilityHandler = nil
             let errData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-            let output = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let errOutput = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.currentProcess = nil
 
-                if output.isEmpty && !errOutput.isEmpty {
+                // If result was already handled by stream parser, nothing to do
+                if state.hasResult() { return }
+
+                // Fallback: stream-json didn't deliver a result event
+                if !errOutput.isEmpty {
                     self.updateLastAssistant("Error: \(errOutput)", state: .complete)
                     self.isLoading = false
-                } else if output.isEmpty {
+                } else {
                     self.updateLastAssistant("No response received.", state: .complete)
                     self.isLoading = false
-                } else {
-                    self.revealText(output)
                 }
             }
         }
@@ -232,7 +320,6 @@ final class AIAssistantViewModel {
         let dir = Self.chatDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        // Save messages + sessionId together
         let payload = ChatPayload(sessionId: sessionId, messageCount: messageCount, messages: completed)
         let url = dir.appendingPathComponent("\(tabId).json")
         if let data = try? JSONEncoder().encode(payload) {
@@ -262,4 +349,57 @@ private struct ChatPayload: Codable {
     let sessionId: String
     let messageCount: Int
     let messages: [ChatMessage]
+}
+
+// MARK: - Thread-safe stream state for readabilityHandler
+
+private final class StreamState: @unchecked Sendable {
+    private var toolUses: [ToolUseInfo] = []
+    private var resultText: String?
+    private var lineBuffer: String = ""
+    private let lock = NSLock()
+
+    func addToolUse(_ info: ToolUseInfo) {
+        lock.lock()
+        toolUses.append(info)
+        lock.unlock()
+    }
+
+    func getToolUses() -> [ToolUseInfo] {
+        lock.lock()
+        defer { lock.unlock() }
+        return toolUses
+    }
+
+    func setResult(_ text: String) {
+        lock.lock()
+        resultText = text
+        lock.unlock()
+    }
+
+    func hasResult() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return resultText != nil
+    }
+
+    /// Append raw data to the line buffer (may contain partial lines)
+    func appendBuffer(_ text: String) {
+        lock.lock()
+        lineBuffer += text
+        lock.unlock()
+    }
+
+    /// Extract all complete lines (terminated by \n) from the buffer
+    func drainLines() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        var lines: [String] = []
+        while let newlineIdx = lineBuffer.firstIndex(of: "\n") {
+            let line = String(lineBuffer[lineBuffer.startIndex..<newlineIdx])
+            lineBuffer = String(lineBuffer[lineBuffer.index(after: newlineIdx)...])
+            lines.append(line)
+        }
+        return lines
+    }
 }

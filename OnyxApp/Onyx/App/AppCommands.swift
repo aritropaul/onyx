@@ -38,7 +38,9 @@ struct AppCommands: Commands {
 
         CommandGroup(after: .textEditing) {
             Button("Command Palette") {
-                appState.isCommandPaletteVisible.toggle()
+                withAnimation(OnyxTheme.Animation.standard) {
+                    appState.isCommandPaletteVisible.toggle()
+                }
             }
             .keyboardShortcut("k", modifiers: .command)
 

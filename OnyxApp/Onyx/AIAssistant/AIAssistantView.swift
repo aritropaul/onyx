@@ -6,7 +6,13 @@ struct AIAssistantView: View {
     @FocusState private var isInputFocused: Bool
 
     private var viewModel: AIAssistantViewModel {
-        appState.aiViewModels[tabId] ?? AIAssistantViewModel()
+        if let existing = appState.aiViewModels[tabId] {
+            return existing
+        }
+        let vm = AIAssistantViewModel()
+        vm.tabId = tabId
+        appState.aiViewModels[tabId] = vm
+        return vm
     }
 
     private var inputTextBinding: Binding<String> {
@@ -58,6 +64,17 @@ struct AIAssistantView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(OnyxTheme.Colors.textTertiary)
             }
+            // Tool capabilities badge
+            HStack(spacing: 6) {
+                Image(systemName: "hammer.fill")
+                    .font(.system(size: 9))
+                Text("Can read, write & search vault files")
+                    .font(.system(size: 10))
+            }
+            .foregroundStyle(OnyxTheme.Colors.textTertiary.opacity(0.5))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(OnyxTheme.Colors.surface, in: Capsule())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -110,48 +127,151 @@ struct AIAssistantView: View {
     // MARK: - Input
 
     private var inputArea: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Ask anything...", text: inputTextBinding, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .foregroundStyle(OnyxTheme.Colors.textPrimary)
-                .lineLimit(1...8)
-                .focused($isInputFocused)
-                .onSubmit {
-                    viewModel.sendMessage(vaultURL: appState.vaultURL, ragEngine: appState.ragEngine)
-                }
+        VStack(spacing: 0) {
+            // Context panel
+            if viewModel.showContextPanel && !viewModel.lastRetrievedContext.isEmpty {
+                ContextPanel(results: viewModel.lastRetrievedContext, ragEngine: appState.ragEngine)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 6)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
 
-            Group {
-                if viewModel.isLoading {
-                    Button { viewModel.cancel() } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 18))
-                            .foregroundStyle(OnyxTheme.Colors.destructive.opacity(0.8))
+            HStack(alignment: .bottom, spacing: 10) {
+                // Context toggle
+                Button {
+                    withAnimation(OnyxTheme.Animation.quick) {
+                        viewModel.showContextPanel.toggle()
                     }
-                    .buttonStyle(.plain)
-                } else {
-                    Button {
+                } label: {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 13))
+                        .foregroundStyle(
+                            viewModel.showContextPanel
+                                ? OnyxTheme.Colors.accent
+                                : OnyxTheme.Colors.textTertiary.opacity(0.5)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Show RAG context")
+
+                TextField("Ask anything...", text: inputTextBinding, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(OnyxTheme.Colors.textPrimary)
+                    .lineLimit(1...8)
+                    .focused($isInputFocused)
+                    .onSubmit {
                         viewModel.sendMessage(vaultURL: appState.vaultURL, ragEngine: appState.ragEngine)
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 18))
+                    }
+
+                Group {
+                    if viewModel.isLoading {
+                        Button { viewModel.cancel() } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(OnyxTheme.Colors.destructive.opacity(0.8))
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Button {
+                            viewModel.sendMessage(vaultURL: appState.vaultURL, ragEngine: appState.ragEngine)
+                        } label: {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(
+                                    viewModel.inputText.trimmingCharacters(in: .whitespaces).isEmpty
+                                        ? OnyxTheme.Colors.textTertiary.opacity(0.3)
+                                        : OnyxTheme.Colors.accent
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.inputText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                .animation(.easeInOut(duration: 0.15), value: viewModel.isLoading)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .glassEffect(.regular, in: Capsule())
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+        }
+    }
+}
+
+// MARK: - Context Panel
+
+private struct ContextPanel: View {
+    let results: [RAGResult]
+    let ragEngine: RAGEngine
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 10))
+                Text("Retrieved Context")
+                    .font(.system(size: 10, weight: .semibold))
+                Spacer()
+                Text("\(results.count) chunks")
+                    .font(.system(size: 9))
+            }
+            .foregroundStyle(OnyxTheme.Colors.textTertiary)
+
+            ForEach(results, id: \.chunk.id) { result in
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 4) {
+                            Text(result.chunk.documentTitle)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(OnyxTheme.Colors.textSecondary)
+                                .lineLimit(1)
+                            if let heading = result.chunk.heading {
+                                Text("> \(heading)")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Text(result.chunk.content.prefix(80) + (result.chunk.content.count > 80 ? "..." : ""))
+                            .font(.system(size: 9))
+                            .foregroundStyle(OnyxTheme.Colors.textTertiary.opacity(0.7))
+                            .lineLimit(1)
+                    }
+
+                    Spacer()
+
+                    // Pin button
+                    Button { ragEngine.togglePin(result.chunk.documentId) } label: {
+                        Image(systemName: ragEngine.pinnedDocIds.contains(result.chunk.documentId) ? "pin.fill" : "pin")
+                            .font(.system(size: 9))
                             .foregroundStyle(
-                                viewModel.inputText.trimmingCharacters(in: .whitespaces).isEmpty
-                                    ? OnyxTheme.Colors.textTertiary.opacity(0.3)
-                                    : OnyxTheme.Colors.accent
+                                ragEngine.pinnedDocIds.contains(result.chunk.documentId)
+                                    ? OnyxTheme.Colors.accent
+                                    : OnyxTheme.Colors.textTertiary
                             )
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.inputText.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .help("Pin — always include in context")
+
+                    // Exclude button
+                    Button { ragEngine.toggleExclude(result.chunk.documentId) } label: {
+                        Image(systemName: ragEngine.excludedDocIds.contains(result.chunk.documentId) ? "eye.slash.fill" : "eye.slash")
+                            .font(.system(size: 9))
+                            .foregroundStyle(
+                                ragEngine.excludedDocIds.contains(result.chunk.documentId)
+                                    ? OnyxTheme.Colors.destructive
+                                    : OnyxTheme.Colors.textTertiary
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Exclude — never include in context")
                 }
+                .padding(.vertical, 2)
             }
-            .animation(.easeInOut(duration: 0.15), value: viewModel.isLoading)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .glassEffect(.regular, in: Capsule())
-        .padding(.horizontal, 24)
-        .padding(.bottom, 16)
+        .padding(10)
+        .background(OnyxTheme.Colors.surface.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -195,6 +315,21 @@ private struct AssistantMessageView: View {
                     .foregroundStyle(OnyxTheme.Colors.textTertiary)
             }
 
+            // Tool use — compact status line
+            if !message.toolUses.isEmpty && message.state != .complete {
+                HStack(spacing: 5) {
+                    Image(systemName: toolIcon(message.toolUses.last!.name))
+                        .font(.system(size: 9))
+                        .foregroundStyle(OnyxTheme.Colors.accent.opacity(0.7))
+                    Text(toolSummary(message.toolUses))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(OnyxTheme.Colors.textTertiary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(OnyxTheme.Colors.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+            }
+
             // Content based on state
             Group {
                 switch message.state {
@@ -235,6 +370,30 @@ private struct AssistantMessageView: View {
         }
     }
 
+    private func toolSummary(_ tools: [ToolUseInfo]) -> String {
+        let counts = Dictionary(grouping: tools, by: \.name).mapValues(\.count)
+        let parts = counts.sorted(by: { $0.key < $1.key }).map { name, count in
+            count > 1 ? "\(name) ×\(count)" : name
+        }
+        let current = tools.last?.name ?? ""
+        if parts.count <= 3 {
+            return parts.joined(separator: " → ")
+        }
+        return "\(tools.count) actions · \(current)"
+    }
+
+    private func toolIcon(_ name: String) -> String {
+        switch name {
+        case "Read": return "doc.text"
+        case "Write": return "square.and.pencil"
+        case "Edit": return "pencil"
+        case "Bash": return "terminal"
+        case "Glob": return "magnifyingglass"
+        case "Grep": return "text.magnifyingglass"
+        default: return "hammer"
+        }
+    }
+
     private func markdownAttributed(_ text: String) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace
@@ -242,7 +401,6 @@ private struct AssistantMessageView: View {
         guard var attributed = try? AttributedString(markdown: text, options: options) else {
             return AttributedString(text)
         }
-        // Force 12px base font, then re-apply bold/italic/code on matching runs
         for run in attributed.runs {
             let intent = run.inlinePresentationIntent ?? []
             if intent.contains(.code) {

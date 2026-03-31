@@ -87,7 +87,34 @@ struct ContentView: View {
         .overlay {
             if appState.isCommandPaletteVisible {
                 CommandPaletteView()
+                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
             }
+        }
+        .animation(OnyxTheme.Animation.standard, value: appState.isCommandPaletteVisible)
+        .overlay {
+            if appState.isSearchVisible {
+                SearchOverlayView(
+                    isVisible: $appState.isSearchVisible,
+                    mode: appState.searchMode
+                )
+            }
+        }
+        // Keyboard shortcuts
+        .onKeyPress(characters: CharacterSet(charactersIn: "p"), phases: .down) { press in
+            if press.modifiers == .command {
+                appState.searchMode = .files
+                appState.isSearchVisible = true
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(characters: CharacterSet(charactersIn: "f"), phases: .down) { press in
+            if press.modifiers == [.command, .shift] {
+                appState.searchMode = .content
+                appState.isSearchVisible = true
+                return .handled
+            }
+            return .ignored
         }
         .task {
             if appState.isVaultConfigured {

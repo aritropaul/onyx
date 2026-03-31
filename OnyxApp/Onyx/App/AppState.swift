@@ -8,6 +8,12 @@ final class AppState {
     var provider: any DocumentProvider
     var vaultURL: URL?
     let ragEngine = RAGEngine()
+    let backlinkEngine = BacklinkEngine()
+
+    // Search state
+    var isSearchVisible: Bool = false
+    var searchMode: SearchMode = .files
+    var pendingSearchHighlight: String? = nil
 
     var selectedProjectId: String?
     var isCommandPaletteVisible: Bool = false
@@ -66,6 +72,8 @@ final class AppState {
         }
         Task {
             await loadSidebarData()
+            // Rebuild backlinks after sidebar data is loaded
+            backlinkEngine.rebuild(documents: documents, provider: provider)
         }
         if let url = vaultURL {
             ragEngine.loadCachedIndex(vaultURL: url)
@@ -99,6 +107,10 @@ final class AppState {
             for await _ in provider.observeChanges() {
                 self?.refreshSidebarData()
                 self?.ragEngine.indexVault(provider: provider)
+                // Rebuild backlinks on changes
+                if let docs = self?.documents {
+                    self?.backlinkEngine.rebuild(documents: docs, provider: provider)
+                }
             }
         }
     }
