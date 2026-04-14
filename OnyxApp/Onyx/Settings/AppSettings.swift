@@ -80,12 +80,48 @@ final class AppSettings {
     /// Auto-detect claude path if not set
     var resolvedClaudePath: String {
         if !claudePath.isEmpty { return claudePath }
-        let paths = [
-            "\(NSHomeDirectory())/.local/bin/claude",
+        let fm = FileManager.default
+        let home = NSHomeDirectory()
+
+        let staticPaths = [
+            "\(home)/.local/bin/claude",
             "/usr/local/bin/claude",
-            "\(NSHomeDirectory())/.claude/bin/claude",
+            "\(home)/.claude/bin/claude",
             "/opt/homebrew/bin/claude",
+            "/opt/homebrew/opt/node/bin/claude",
         ]
-        return paths.first { FileManager.default.fileExists(atPath: $0) } ?? ""
+        if let hit = staticPaths.first(where: { fm.fileExists(atPath: $0) }) {
+            return hit
+        }
+
+        let nvmDir = "\(home)/.nvm/versions/node"
+        if let versions = try? fm.contentsOfDirectory(atPath: nvmDir) {
+            let sorted = versions.sorted(by: >)
+            for v in sorted {
+                let p = "\(nvmDir)/\(v)/bin/claude"
+                if fm.fileExists(atPath: p) { return p }
+            }
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        task.arguments = ["-lc", "command -v claude"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let out = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !out.isEmpty, fm.fileExists(atPath: out) {
+                return out
+            }
+        } catch {
+            // fall through
+        }
+
+        return ""
     }
 }
